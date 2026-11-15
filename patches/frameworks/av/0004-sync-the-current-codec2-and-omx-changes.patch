@@ -1,0 +1,230 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [frameworks/av] sync the current codec2 and OMX changes
+
+diff --git a/media/codec2/sfplugin/CCodec.cpp b/media/codec2/sfplugin/CCodec.cpp
+index ea44e121d4..c2bb0f3464 100644
+--- a/media/codec2/sfplugin/CCodec.cpp
++++ b/media/codec2/sfplugin/CCodec.cpp
+@@ -2132,7 +2132,9 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
+     using namespace android::hardware::media::omx::V1_0::utils;
+     using namespace android::hardware::graphics::bufferqueue::V1_0::utils;
+     typedef android::hardware::media::omx::V1_0::Status OmxStatus;
+-    android::sp<IOmx> omx = IOmx::getService();
++    // Non-blocking lookup: the vendor OMX HAL is a 32-bit binary that cannot
++    // exec on this 64-bit-only image, and getService() would retry forever.
++    android::sp<IOmx> omx = IOmx::tryGetService();
+     if (omx == nullptr) {
+         return nullptr;
+     }
+@@ -3406,17 +3408,28 @@ void CCodec::initiateReleaseIfStuck() {
+ // static
+ PersistentSurface *CCodec::CreateInputSurface() {
+     using namespace android;
+-    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
+-            Codec2Client::CreateInputSurface();
+-    if (inputSurface) {
+-        ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
+-        ANativeWindow *window = inputSurface->getNativeWindow();
+-        return new PersistentSurface(PersistentSurface::TYPE_INPUTSURFACE,
+-                mediaflagtools::nativeWindowToSurfaceType(window),
+-                interface);
+-    }
++    // zephyr: this device's Codec2 store is HIDL-only
++    // (vendor.qti.media.c2@1.0-service, exposing IComponentStore/default and
++    // /default2 plus media.swcodec's /software). Asking that store for a
++    // store-provided input surface never returns: Codec2Client enumerates
++    // "default" "default2" "software" "__ApexCodecs__" and blocks inside the
++    // HIDL call, so CCodec's own watchdog fires first and turns it into a fatal
++    // error:
++    //
++    //   W CCodec: [c2.qti.avc.encoder] previous call to createInputSurface
++    //             exceeded timeout
++    //   -> onError(UNKNOWN_ERROR, ACTION_CODE_FATAL)
++    //   screenrecord: ERROR: unable to create encoder input surface (err=-2147483648)
++    //
++    // Decoding to a Surface still worked because that path allocates its output
++    // buffers through the buffer channel and never calls this.
++    //
++    // debug.stagefright.c2inputsurface=-1 already selects a locally created
++    // AidlGraphicBufferSource, but stock only tests it *after* the hanging store
++    // call, so it could never take effect here. Test it first: with the switch
++    // set, the surface is built in-process and Codec2Client::CreateInputSurface()
++    // is never entered. Set it to -1 in the device props.
+     if (property_get_int32("debug.stagefright.c2inputsurface", 0) == -1) {
+-        sp<IGraphicBufferProducer> gbp;
+         sp<AidlGraphicBufferSource> gbs = new AidlGraphicBufferSource();
+         status_t err = gbs->initCheck();
+         if (err != OK) {
+@@ -3432,9 +3445,19 @@ PersistentSurface *CCodec::CreateInputSurface() {
+               PersistentSurface::TYPE_AIDLSOURCE,
+               mediaflagtools::igbpToSurfaceType(gbs->getIGraphicBufferProducer()),
+               wrapper->asBinder());
+-    } else {
+-        return nullptr;
+     }
++
++    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
++            Codec2Client::CreateInputSurface();
++    if (inputSurface) {
++        ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
++        ANativeWindow *window = inputSurface->getNativeWindow();
++        return new PersistentSurface(PersistentSurface::TYPE_INPUTSURFACE,
++                mediaflagtools::nativeWindowToSurfaceType(window),
++                interface);
++    }
++
++    return nullptr;
+ }
+ 
+ class IntfCache {
+diff --git a/media/libmediaplayerservice/MediaPlayerService.cpp b/media/libmediaplayerservice/MediaPlayerService.cpp
+index ac67a5f191..05d05926b7 100644
+--- a/media/libmediaplayerservice/MediaPlayerService.cpp
++++ b/media/libmediaplayerservice/MediaPlayerService.cpp
+@@ -915,8 +915,14 @@ sp<MediaPlayerBase> MediaPlayerService::Client::setDataSource_pre(
+ 
+         // Listen to death of OMX service
+         {
++            // Must not block. getService() retries forever while the service is
++            // not registered, and on a codec2-only vendor the OMX HAL is often
++            // absent entirely - here the stock binary is 32-bit and cannot even
++            // exec on a 64-bit-only image, so it never registers. Blocking here
++            // hangs setDataSource() and ANRs any app that plays a sound from the
++            // UI thread (e.g. Messaging's sent-message tone on send).
+             sp<IBase> base = ::android::hardware::media::omx::V1_0::
+-                    IOmx::getService();
++                    IOmx::tryGetService();
+             if (base == nullptr) {
+                 ALOGD("OMX service is not available");
+             } else {
+diff --git a/media/libmediaplayerservice/MediaRecorderClient.cpp b/media/libmediaplayerservice/MediaRecorderClient.cpp
+index 4d70a71c57..175d601adc 100644
+--- a/media/libmediaplayerservice/MediaRecorderClient.cpp
++++ b/media/libmediaplayerservice/MediaRecorderClient.cpp
+@@ -471,8 +471,11 @@ status_t MediaRecorderClient::setListener(const sp<IMediaRecorderClient>& listen
+ 
+         // Listen to OMX's IOmxStore/default
+         {
++            // Non-blocking lookup: getService() retries forever when the vendor
++            // OMX HAL is absent (it cannot exec on this 64-bit-only image) and
++            // would wedge every MediaRecorder construction.
+             sp<IBase> base = ::android::hardware::media::omx::V1_0::
+-                    IOmx::getService();
++                    IOmx::tryGetService();
+             if (base == nullptr) {
+                 ALOGD("OMX service is not available");
+             } else {
+diff --git a/media/libstagefright/OmxInfoBuilder.cpp b/media/libstagefright/OmxInfoBuilder.cpp
+index 1cb8f14fd5..e672d0e0cd 100644
+--- a/media/libstagefright/OmxInfoBuilder.cpp
++++ b/media/libstagefright/OmxInfoBuilder.cpp
+@@ -94,8 +94,14 @@ OmxInfoBuilder::OmxInfoBuilder(bool allowSurfaceEncoders)
+ }
+ 
+ status_t OmxInfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
+-    // Obtain IOmxStore
+-    sp<IOmxStore> omxStore = IOmxStore::getService();
++    // Obtain IOmxStore. This must not block. zephyr ships the stock OMX HAL,
++    // which is a 32-bit binary, and the product is 64-bit-only, so the service
++    // can never register. A blocking getService() spins forever on "Waited one
++    // second for android.hardware.media.omx@1.0::IOmxStore/default", which
++    // stalls MediaCodecList construction for every client and leaves players
++    // stuck buffering. Ask for the stub: it returns null immediately and the
++    // NO_INIT below is handled, so the C2 builders still enumerate codecs.
++    sp<IOmxStore> omxStore = IOmxStore::getService("default", true /* getStub */);
+     if (omxStore == nullptr) {
+         ALOGE("Cannot find an IOmxStore service.");
+         return NO_INIT;
+diff --git a/media/module/bqhelper/flagged_files/DeprecatedGraphicBufferSource.inc b/media/module/bqhelper/flagged_files/DeprecatedGraphicBufferSource.inc
+index 8d4c8c513f..68c4b9a9e4 100644
+--- a/media/module/bqhelper/flagged_files/DeprecatedGraphicBufferSource.inc
++++ b/media/module/bqhelper/flagged_files/DeprecatedGraphicBufferSource.inc
+@@ -397,6 +397,10 @@ sp<IGraphicBufferProducer> GraphicBufferSource::getIGraphicBufferProducer() cons
+     return mProducer;
+ }
+ 
++sp<IGraphicBufferProducer> GraphicBufferSource::getHGraphicBufferProducer() const {
++    return getIGraphicBufferProducer();
++}
++
+ sp<::android::hardware::graphics::bufferqueue::V1_0::IGraphicBufferProducer>
+ GraphicBufferSource::getHGraphicBufferProducer_V1_0() const {
+     using TWGraphicBufferProducer = ::android::TWGraphicBufferProducer<
+diff --git a/media/module/bqhelper/flagged_files/GraphicBufferSource.inc b/media/module/bqhelper/flagged_files/GraphicBufferSource.inc
+index 368c97902e..8254f4f365 100644
+--- a/media/module/bqhelper/flagged_files/GraphicBufferSource.inc
++++ b/media/module/bqhelper/flagged_files/GraphicBufferSource.inc
+@@ -320,6 +320,10 @@ sp<IGraphicBufferProducer> GraphicBufferSource::getIGraphicBufferProducer() cons
+     return mSurface->getIGraphicBufferProducer();
+ }
+ 
++sp<IGraphicBufferProducer> GraphicBufferSource::getHGraphicBufferProducer() const {
++    return getIGraphicBufferProducer();
++}
++
+ sp<::android::hardware::graphics::bufferqueue::V1_0::IGraphicBufferProducer>
+ GraphicBufferSource::getHGraphicBufferProducer_V1_0() const {
+     using TWGraphicBufferProducer = ::android::TWGraphicBufferProducer<
+diff --git a/media/module/bqhelper/include/media/stagefright/bqhelper/GraphicBufferSource.h b/media/module/bqhelper/include/media/stagefright/bqhelper/GraphicBufferSource.h
+index 1521ef31df..15a1ff2c26 100644
+--- a/media/module/bqhelper/include/media/stagefright/bqhelper/GraphicBufferSource.h
++++ b/media/module/bqhelper/include/media/stagefright/bqhelper/GraphicBufferSource.h
+@@ -99,6 +99,11 @@ public:
+     // queued on this will be received by GraphicBufferSource.
+     sp<IGraphicBufferProducer> getIGraphicBufferProducer() const;
+ 
++    // Deprecated pre-Android-14 ABI: vendor Codec2 blobs built against the
++    // old bufferqueue helper still import this symbol. Forward to the current
++    // accessor so those blobs load.
++    sp<IGraphicBufferProducer> getHGraphicBufferProducer() const;
++
+     // Returns the handle to the bufferqueue HAL (V1_0) producer side of the BufferQueue.
+     // Buffers queued on this will be received by GraphicBufferSource.
+     sp<::android::hardware::graphics::bufferqueue::V1_0::IGraphicBufferProducer>
+diff --git a/media/module/foundation/AHandler.cpp b/media/module/foundation/AHandler.cpp
+index d8b0aaf2a3..a6c690cd2c 100644
+--- a/media/module/foundation/AHandler.cpp
++++ b/media/module/foundation/AHandler.cpp
+@@ -24,10 +24,13 @@
+ namespace android {
+ 
+ void AHandler::deliverMessage(const sp<AMessage> &msg) {
+-    setDeliveryStatus(true, msg->what(), ALooper::GetNowUs());
++    // Do not record the delivery status here. Vendor blobs built against an
++    // older AOSP revision (e.g. Xiaomi's libmiface.so) subclass AHandler with
++    // an object that ends where this tree places mLock/mDeliveringMessage, so
++    // locking mLock on such a handler reads past its allocation and blocks the
++    // handler thread forever.
+     onMessageReceived(msg);
+     mMessageCounter++;
+-    setDeliveryStatus(false, 0, 0);
+ 
+     if (mVerboseStats) {
+         uint32_t what = msg->what();
+diff --git a/media/module/foundation/ALooperRoster.cpp b/media/module/foundation/ALooperRoster.cpp
+index daa90be83f..25ea6bce1c 100644
+--- a/media/module/foundation/ALooperRoster.cpp
++++ b/media/module/foundation/ALooperRoster.cpp
+@@ -143,20 +143,9 @@ void ALooperRoster::dump(int fd, const Vector<String16>& args) {
+             s.append(looper->getName());
+             sp<AHandler> handler = info.mHandler.promote();
+             if (handler != NULL) {
+-                bool deliveringMessages;
+-                uint32_t currentMessageWhat;
+-                int64_t currentDeliveryDurationUs;
+-                handler->getDeliveryStatus(deliveringMessages,
+-                                           currentMessageWhat,
+-                                           currentDeliveryDurationUs);
+                 handler->mVerboseStats = verboseStats;
+-                s.appendFormat(": %" PRIu64 " messages processed, delivering "
+-                               "%d, current msg %" PRIu32 ", current msg "
+-                               "durationUs %" PRIu64 "",
+-                               handler->mMessageCounter,
+-                               deliveringMessages,
+-                               currentMessageWhat,
+-                               currentDeliveryDurationUs);
++                s.appendFormat(": %" PRIu64 " messages processed",
++                               handler->mMessageCounter);
+                 if (verboseStats) {
+                     for (size_t j = 0; j < handler->mMessages.size(); j++) {
+                         char fourcc[15];

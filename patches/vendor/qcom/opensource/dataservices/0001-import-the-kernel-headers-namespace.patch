@@ -1,0 +1,17 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [vendor/qcom/opensource/dataservices] import the kernel headers namespace
+
+diff --git a/Android.bp b/Android.bp
+index 9515b25..f713cc6 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -1,2 +1,8 @@
+ soong_namespace {
++    imports: [
++        // librmnetctl puts qti_kernel_headers on its header_libs, and soong
++        // imports do not chain, so the kernel-headers namespace that defines
++        // the module has to be imported here as well.
++        "hardware/google/pixel/kernel_headers",
++    ],
+ }

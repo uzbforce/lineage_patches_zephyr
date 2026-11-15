@@ -1,0 +1,80 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [vendor/lineage] expand an undefined vendor variable to nothing
+
+diff --git a/build/soong/Android.bp b/build/soong/Android.bp
+index 295a6af..910dfef 100644
+--- a/build/soong/Android.bp
++++ b/build/soong/Android.bp
+@@ -29,10 +29,27 @@ lineage_generator {
+          "    popd; " +
+          "    gzip -d $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar.gz; " +
+          "    tar -xf $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/kernel-uapi-headers.tar -C $(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
+-         "else " +
++         // A device that ships a prebuilt kernel exports no kernel make command
++         // to this namespace (KERNEL_MAKE_CMD lives in BoardConfigKernel.mk,
++         // which such trees do not include), so this branch used to expand to
++         // " -C  O= ARCH=  headers_install" and die with "-C: command not
++         // found". Use the uapi header set the device ships for the prebuilt
++         // route instead.
++         "elif [ -n \"$(KERNEL_MAKE_CMD)\" ]; then " +
+          "    $(PATH_OVERRIDE_SOONG) $(KERNEL_MAKE_CMD) $(KERNEL_MAKE_FLAGS) -C $(TARGET_KERNEL_SOURCE) O=$(KERNEL_BUILD_OUT_PREFIX)$(genDir) ARCH=$(KERNEL_ARCH) $(KERNEL_CROSS_COMPILE) headers_install; " +
++         "elif [ -n \"$(TARGET_BOARD_KERNEL_HEADERS)\" ]; then " +
++         "    mkdir -p $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/usr/include; " +
++         "    cp -a $(TARGET_BOARD_KERNEL_HEADERS)/. $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/usr/include/; " +
++         "else " +
++         "    mkdir -p $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/usr/include; " +
+          "fi; " +
+-         "vendor/lineage/tools/clean_headers.sh $(KERNEL_BUILD_OUT_PREFIX)$(genDir)",
++         // clean_headers.sh runs clean_header.py on usr/include/asm/signal.h and
++         // exits non-zero when that file is absent, which is the case for a
++         // device whose headers come from the prebuilt tree above rather than
++         // from this generator.
++         "if [ -f $(KERNEL_BUILD_OUT_PREFIX)$(genDir)/usr/include/asm/signal.h ]; then " +
++         "    vendor/lineage/tools/clean_headers.sh $(KERNEL_BUILD_OUT_PREFIX)$(genDir); " +
++         "fi",
+ 
+     // Directories that can be imported by a cc_* module generated_headers property
+     export_include_dirs: [
+diff --git a/build/soong/generator/variables.go b/build/soong/generator/variables.go
+index 8485f94..ecb6d58 100644
+--- a/build/soong/generator/variables.go
++++ b/build/soong/generator/variables.go
+@@ -1,7 +1,7 @@
+ package generator
+ 
+ import (
+-	"fmt"
++	"strings"
+ 
+ 	"android/soong/android"
+ )
+@@ -10,13 +10,24 @@ func lineageExpandVariables(ctx android.ModuleContext, in string) string {
+ 	lineageVars := ctx.Config().VendorConfig("lineageVarsPlugin")
+ 
+ 	out, err := android.Expand(in, func(name string) (string, error) {
++		// $(genDir) and $(location ...) belong to the lineage_generator module
++		// and are expanded by it after this pass. Leaving them to the empty
++		// string here erases them instead: an undefined variable expands to "",
++		// so $(genDir) disappeared and the generated command wrote to the host
++		// filesystem root (/usr/include) instead of the module output dir.
++		if name == "genDir" || name == "location" || strings.HasPrefix(name, "location ") {
++			return "$(" + name + ")", nil
++		}
+ 		if lineageVars.IsSet(name) {
+ 			return lineageVars.String(name), nil
+ 		}
+-		// This variable is not for us, restore what the original
+-		// variable string will have looked like for an Expand
+-		// that comes later.
+-		return fmt.Sprintf("$(%s)", name), nil
++		// Undefined vendor variables expand to the empty string. Device
++		// trees that ship a prebuilt kernel never define the kernel
++		// generator variables (KERNEL_BUILD_OUT_PREFIX,
++		// TARGET_KERNEL_PLATFORM_TARGET, ...), and soong expands the
++		// generated_kernel_includes / prebuilt_kernel_includes commands
++		// during analysis even when nothing builds them.
++		return "", nil
+ 	})
+ 
+ 	if err != nil {

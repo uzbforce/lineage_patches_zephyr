@@ -1,0 +1,334 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [hardware/lineage/interfaces] drive the FOD press/release through the vendor extCmd
+
+diff --git a/biometrics/fingerprint/aidl/Fingerprint.cpp b/biometrics/fingerprint/aidl/Fingerprint.cpp
+index 381b394..9fde2bf 100644
+--- a/biometrics/fingerprint/aidl/Fingerprint.cpp
++++ b/biometrics/fingerprint/aidl/Fingerprint.cpp
+@@ -40,10 +40,13 @@ Fingerprint::Fingerprint(std::shared_ptr<FingerprintConfig> config)
+         mSensorType = FingerprintSensorType::HOME_BUTTON;
+     } else if (sensorTypeProp == "rear") {
+         mSensorType = FingerprintSensorType::REAR;
++    } else if (sensorTypeProp == "udfps" || sensorTypeProp == "udfps_optical") {
++        mSensorType = FingerprintSensorType::UNDER_DISPLAY_OPTICAL;
+     } else {
++        // Not fatal: a sensor type we do not know is worth a loud log, but
++        // taking the HAL down over it would lose the sensor entirely.
++        ALOGE("unrecognized or unimplemented fingerprint behavior: %s", sensorTypeProp.c_str());
+         mSensorType = FingerprintSensorType::UNKNOWN;
+-        UNIMPLEMENTED(FATAL) << "unrecognized or unimplemented fingerprint behavior: "
+-                             << sensorTypeProp;
+     }
+     ALOGI("sensorTypeProp: %s", sensorTypeProp.c_str());
+ }
+@@ -66,8 +69,19 @@ fingerprint_device_t* Fingerprint::openHal() {
+     int err;
+     const hw_module_t* hw_mdl = nullptr;
+     ALOGD("Opening fingerprint hal library...");
++
++    // The stock module is a plain libhardware driver, not a HIDL service: this
++    // device ships it as /vendor/lib64/hw/fingerprint.goodix_fod.so, and the
++    // HIDL 2.1 service that used to load it is gone.
++    //
++    // hw_get_module() is the only correct lookup here. It resolves
++    // hw/fingerprint.<ro.hardware.fingerprint>.so first, and the device props
++    // pin that to goodix_fod. hw_get_module_by_class("fingerprint", "goodix_fod")
++    // would build the name "fingerprint.goodix_fod" and then look for
++    // hw/fingerprint.goodix_fod.<ro.hardware>.so, which does not exist.
+     if (0 != (err = hw_get_module(FINGERPRINT_HARDWARE_MODULE_ID, &hw_mdl))) {
+-        ALOGE("Can't open fingerprint HW Module, error: %d", err);
++        ALOGE("Can't open fingerprint HW Module (ro.hardware.fingerprint=%s), error: %d",
++              ::android::base::GetProperty("ro.hardware.fingerprint", "<unset>").c_str(), err);
+         return nullptr;
+     }
+ 
+@@ -181,7 +195,9 @@ ndk::ScopedAStatus Fingerprint::createSession(int32_t /*sensorId*/, int32_t user
+                                               std::shared_ptr<ISession>* out) {
+     CHECK(mSession == nullptr || mSession->isClosed()) << "Open session already exists!";
+ 
+-    mSession = SharedRefBase::make<Session>(mDevice, userId, cb, mLockoutTracker);
++    mSession = SharedRefBase::make<Session>(mDevice, userId, cb, mLockoutTracker,
++                                            mSensorType ==
++                                                    FingerprintSensorType::UNDER_DISPLAY_OPTICAL);
+     *out = mSession;
+ 
+     mSession->linkToDeath(cb->asBinder().get());
+diff --git a/biometrics/fingerprint/aidl/Session.cpp b/biometrics/fingerprint/aidl/Session.cpp
+index a2d20c5..238c03e 100644
+--- a/biometrics/fingerprint/aidl/Session.cpp
++++ b/biometrics/fingerprint/aidl/Session.cpp
+@@ -4,6 +4,14 @@
+  * SPDX-License-Identifier: Apache-2.0
+  */
+ 
++#include <fcntl.h>
++#include <unistd.h>
++
++#include <cerrno>
++#include <chrono>
++#include <cstddef>
++#include <cstdio>
++#include <cstring>
+ #include <thread>
+ 
+ #include "Legacy2Aidl.h"
+@@ -13,6 +21,61 @@
+ 
+ namespace aidl::android::hardware::biometrics::fingerprint {
+ 
++namespace {
++
++// Vendor FOD control.
++//
++// Xiaomi's libhardware modules keep a vendor extension in
++// fingerprint_device_t::reserved[0] - the slot AOSP reserves for precisely this
++// kind of out-of-tree addition. fingerprint.goodix_fod.so installs its handler
++// there (struct offset 0xd0) and the handler is what arms the FOD capture:
++//
++//   cmd=1 param=1 -> logs "HBM and Green spot ready", notifies ACQUIRED(1002)
++//                    and posts the FOD press event
++//   cmd=1 param=0 -> notifies ACQUIRED(1003) and posts the release
++//
++// This is the channel the stock HIDL 2.1 HAL could never provide:
++// UdfpsHelper.onFingerDown() casts to V2_3, which always fails against a 2.1
++// blob, so the module never learned a finger was on the sensor and every
++// enrollment session ran into its 60 s timeout and ended in CANCELED.
++constexpr int kFodPressed = 1;
++constexpr int kFodReleased = 0;
++
++static_assert(offsetof(fingerprint_device_t, reserved) == 0xd0,
++              "vendor extCmd lives in reserved[0] at 0xd0; the HAL ABI changed");
++
++// UDFPS panel illumination.
++//
++// The official P19A panel DTS has no green local-HBM command. It defines only
++// the white 110-nit and white 1000-nit modes, so the kernel's green-500 case has
++// no command set to send. The 110-nit mode is the dim, purple-gray low-light
++// mode: at high brightness it is dimmer than the panel itself, and enrollment
++// cannot see a clean ridge image. The 1000-nit mode is the real white HBM. Use
++// it for every FOD interaction; it is a local panel mode and must never touch
++// the normal backlight. The 5-second watchdog releases it if the framework does
++// not deliver onPointerUp.
++constexpr char kDispParamPath[] = "/sys/class/mi_display/disp-DSI-0/disp_param";
++constexpr int kDispFeatureLocalHbm = 9;
++constexpr int kLocalHbmWhite1000Nit = 1;
++constexpr auto kHbmWatchdog = std::chrono::seconds(5);
++
++void setLocalHbm(int value) {
++    int fd = open(kDispParamPath, O_WRONLY | O_CLOEXEC);
++    if (fd < 0) {
++        ALOGE("FOD: cannot open %s: %s", kDispParamPath, strerror(errno));
++        return;
++    }
++
++    char buf[32];
++    int len = snprintf(buf, sizeof(buf), "%d %d\n", kDispFeatureLocalHbm, value);
++    if (len < 0 || write(fd, buf, len) != len) {
++        ALOGE("FOD: cannot set local HBM %d: %s", value, strerror(errno));
++    }
++    close(fd);
++}
++
++}  // namespace
++
+ void onClientDeath(void* cookie) {
+     ALOGI("FingerprintService has died");
+     Session* session = static_cast<Session*>(cookie);
+@@ -22,8 +85,8 @@ void onClientDeath(void* cookie) {
+ }
+ 
+ Session::Session(fingerprint_device_t* device, int userId, std::shared_ptr<ISessionCallback> cb,
+-                 LockoutTracker lockoutTracker)
+-    : mDevice(device), mLockoutTracker(lockoutTracker), mUserId(userId), mCb(cb) {
++                 LockoutTracker lockoutTracker, bool udfps)
++    : mDevice(device), mLockoutTracker(lockoutTracker), mUdfps(udfps), mUserId(userId), mCb(cb) {
+     mDeathRecipient = AIBinder_DeathRecipient_new(onClientDeath);
+ 
+     auto path = std::format("/data/vendor_de/{}/fpdata/", userId);
+@@ -52,6 +115,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
+     translate(hat, authToken);
+     int error = mDevice->enroll(mDevice, &authToken, mUserId, 60);
+     if (error) {
++        setHbm(false);
+         ALOGE("enroll failed: %d", error);
+         mCb->onError(Error::UNABLE_TO_PROCESS, error);
+     }
+@@ -65,6 +129,7 @@ ndk::ScopedAStatus Session::authenticate(int64_t operationId,
+     checkSensorLockout();
+     int error = mDevice->authenticate(mDevice, operationId, mUserId);
+     if (error) {
++        setHbm(false);
+         ALOGE("authenticate failed: %d", error);
+         mCb->onError(Error::UNABLE_TO_PROCESS, error);
+     }
+@@ -123,17 +188,75 @@ ndk::ScopedAStatus Session::resetLockout(const HardwareAuthToken& /*hat*/) {
+     return ndk::ScopedAStatus::ok();
+ }
+ 
+-ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t /*x*/, int32_t /*y*/,
++ndk::ScopedAStatus Session::onPointerDown(int32_t /*pointerId*/, int32_t x, int32_t y,
+                                           float /*minor*/, float /*major*/) {
+-    // Not implemented
+-    return ndk::ScopedAStatus::ok();
++    return sendFodEvent(kFodPressed, x, y);
+ }
+ 
+ ndk::ScopedAStatus Session::onPointerUp(int32_t /*pointerId*/) {
+-    // Not implemented
++    return sendFodEvent(kFodReleased, 0, 0);
++}
++
++ndk::ScopedAStatus Session::sendFodEvent(int pressStatus, int x, int y) {
++    if (!mUdfps || mDevice == nullptr) {
++        return ndk::ScopedAStatus::ok();
++    }
++
++    auto extCmd = reinterpret_cast<int (*)(fingerprint_device_t*, int, int)>(
++            mDevice->reserved[0]);
++    if (extCmd == nullptr) {
++        ALOGE("FOD: HAL has no vendor extCmd in reserved[0]");
++        return ndk::ScopedAStatus::ok();
++    }
++
++    if (pressStatus == kFodPressed) {
++        setHbm(true);
++    }
++
++    int ret = extCmd(mDevice, 1, pressStatus);
++    if (ret != 0) {
++        ALOGE("FOD: extCmd(press_status, %d) at %d,%d -> %d", pressStatus, x, y, ret);
++        if (pressStatus == kFodPressed) {
++            setHbm(false);
++        }
++        return ndk::ScopedAStatus::ok();
++    }
++
++    ALOGD("FOD: extCmd(press_status, %d) at %d,%d", pressStatus, x, y);
++    if (pressStatus == kFodReleased) {
++        setHbm(false);
++    }
+     return ndk::ScopedAStatus::ok();
+ }
+ 
++void Session::setHbm(bool enable) {
++    if (!mUdfps) {
++        return;
++    }
++
++    if (!enable) {
++        ++mHbmState->generation;
++        mHbmState->on = false;
++        setLocalHbm(0);
++        return;
++    }
++
++    const uint32_t generation = ++mHbmState->generation;
++    mHbmState->on = true;
++    ALOGD("FOD: local HBM 1000-nit");
++    setLocalHbm(kLocalHbmWhite1000Nit);
++
++    auto state = mHbmState;
++    std::thread([state, generation]() {
++        std::this_thread::sleep_for(kHbmWatchdog);
++        if (state->on.load() && state->generation.load() == generation) {
++            ALOGE("FOD: no release or HAL completion, forcing local HBM off");
++            setLocalHbm(0);
++            state->on = false;
++        }
++    }).detach();
++}
++
+ ndk::ScopedAStatus Session::onUiReady() {
+     // TODO: stub
+ 
+@@ -179,6 +302,7 @@ ndk::ScopedAStatus Session::setIgnoreDisplayTouches(bool /*shouldIgnore*/) {
+ }
+ 
+ ndk::ScopedAStatus Session::cancel() {
++    setHbm(false);
+     int ret = mDevice->cancel(mDevice);
+ 
+     if (ret == 0) {
+@@ -190,6 +314,7 @@ ndk::ScopedAStatus Session::cancel() {
+ }
+ 
+ ndk::ScopedAStatus Session::close() {
++    setHbm(false);
+     mClosed = true;
+     mCb->onSessionClosed();
+     AIBinder_DeathRecipient_delete(mDeathRecipient);
+@@ -310,6 +435,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
+     // const uint64_t devId = reinterpret_cast<uint64_t>(mDevice);
+     switch (msg->type) {
+         case FINGERPRINT_ERROR: {
++            setHbm(false);
+             int32_t vendorCode = 0;
+             Error result = VendorErrorFilter(msg->data.error, &vendorCode);
+             ALOGD("onError(%hhd, %d)", result, vendorCode);
+@@ -327,6 +453,9 @@ void Session::notify(const fingerprint_msg_t* msg) {
+                   msg->data.enroll.finger.gid, msg->data.enroll.samples_remaining);
+             mCb->onEnrollmentProgress(msg->data.enroll.finger.fid,
+                                       msg->data.enroll.samples_remaining);
++            if (msg->data.enroll.samples_remaining == 0) {
++                setHbm(false);
++            }
+         } break;
+         case FINGERPRINT_TEMPLATE_REMOVED: {
+             ALOGD("onRemove(fid=%d, gid=%d, rem=%d)", msg->data.removed.finger.fid,
+@@ -336,6 +465,7 @@ void Session::notify(const fingerprint_msg_t* msg) {
+             mCb->onEnrollmentsRemoved(enrollments);
+         } break;
+         case FINGERPRINT_AUTHENTICATED: {
++            setHbm(false);
+             ALOGD("onAuthenticated(fid=%d, gid=%d)", msg->data.authenticated.finger.fid,
+                   msg->data.authenticated.finger.gid);
+             if (msg->data.authenticated.finger.fid != 0) {
+diff --git a/biometrics/fingerprint/aidl/Session.h b/biometrics/fingerprint/aidl/Session.h
+index ee51c0d..ca95560 100644
+--- a/biometrics/fingerprint/aidl/Session.h
++++ b/biometrics/fingerprint/aidl/Session.h
+@@ -14,6 +14,10 @@
+ #include <hardware/hardware.h>
+ #include <log/log.h>
+ 
++#include <atomic>
++#include <cstdint>
++#include <memory>
++
+ #include "LockoutTracker.h"
+ 
+ using ::aidl::android::hardware::biometrics::common::ICancellationSignal;
+@@ -28,7 +32,7 @@ void onClientDeath(void* cookie);
+ class Session : public BnSession {
+   public:
+     Session(fingerprint_device_t* device, int userId, std::shared_ptr<ISessionCallback> cb,
+-            LockoutTracker lockoutTracker);
++            LockoutTracker lockoutTracker, bool udfps);
+     ndk::ScopedAStatus generateChallenge() override;
+     ndk::ScopedAStatus revokeChallenge(int64_t challenge) override;
+     ndk::ScopedAStatus enroll(const HardwareAuthToken& hat,
+@@ -69,6 +73,24 @@ class Session : public BnSession {
+     LockoutTracker mLockoutTracker;
+     bool mClosed = false;
+ 
++    // UDFPS sensors need the vendor extCmd hook to arm the FOD capture window;
++    // see sendFodEvent().
++    bool mUdfps;
++
++    ndk::ScopedAStatus sendFodEvent(int pressStatus, int x, int y);
++
++    // Local HBM is panel state, not session state: the framework does not
++    // always deliver onPointerUp (unlock, the enrolled-fingerprint list,
++    // canceled enrollment), so every path that finishes a capture must drop
++    // it. The generation counter invalidates the watchdog on each press.
++    struct HbmState {
++        std::atomic<bool> on{false};
++        std::atomic<uint32_t> generation{0};
++    };
++
++    void setHbm(bool enable);
++    std::shared_ptr<HbmState> mHbmState = std::make_shared<HbmState>();
++
+     // static ndk::ScopedAStatus ErrorFilter(int32_t error);
+     static Error VendorErrorFilter(int32_t error, int32_t* vendorCode);
+     static AcquiredInfo VendorAcquiredFilter(int32_t info, int32_t* vendorCode);

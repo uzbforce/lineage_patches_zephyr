@@ -1,0 +1,21 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [hardware/qcom-caf/sm6225/data-ipa-cfg-mgr] import the kernel headers namespace
+
+diff --git a/Android.bp b/Android.bp
+index a89dcc6..c40e3ee 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -1,5 +1,11 @@
+ soong_namespace {
+     imports: [
+-        "hardware/qcom-caf/sm6225"
++        "hardware/qcom-caf/sm6225",
++        // soong imports are not transitive, so the kernel headers namespace the
++        // platform one imports has to be named here as well: ipacm puts
++        // qti_kernel_headers on its header_libs, and without this line the
++        // build stops with "module ipacm missing dependencies:
++        // qti_kernel_headers".
++        "hardware/google/pixel/kernel_headers",
+     ],
+ }

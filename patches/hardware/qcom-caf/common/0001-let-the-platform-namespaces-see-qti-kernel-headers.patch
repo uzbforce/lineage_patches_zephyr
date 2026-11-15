@@ -1,0 +1,20 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [hardware/qcom-caf/common] let the platform namespaces see qti_kernel_headers
+
+diff --git a/os_pickup_qssi.bp b/os_pickup_qssi.bp
+index 3223ff5..cb2f33d 100644
+--- a/os_pickup_qssi.bp
++++ b/os_pickup_qssi.bp
+@@ -2,5 +2,11 @@ soong_namespace {
+     imports: [
+         "vendor/qcom/opensource/commonsys-intf/display",
+         "vendor/qcom/opensource/display",
++        // Part of the platform's kernel_headers plumbing: the display trees
++        // (gralloc, libdrmutils, sde-drm, ...) put qti_kernel_headers on their
++        // header_libs, and that module is defined in this namespace. Without
++        // the import soong reports "module libgrallocutils missing
++        // dependencies: qti_kernel_headers".
++        "hardware/google/pixel/kernel_headers",
+     ],
+ }

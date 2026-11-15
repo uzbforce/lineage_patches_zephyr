@@ -1,0 +1,96 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [frameworks/base] keep the storage service off the codec path and give the QTI IMS apk its stub
+
+diff --git a/services/core/java/com/android/server/StorageManagerService.java b/services/core/java/com/android/server/StorageManagerService.java
+index 81e70659f0c6..141fd660f4e3 100644
+--- a/services/core/java/com/android/server/StorageManagerService.java
++++ b/services/core/java/com/android/server/StorageManagerService.java
+@@ -972,7 +972,14 @@ class StorageManagerService extends IStorageManager.Stub
+             }
+         }
+ 
+-        configureTranscoding();
++        // Codec enumeration reaches IMediaPlayerService#getCodecList(). On this port
++        // the vendor Codec2 HAL does not start, and that binder call never returns,
++        // so running it here would wedge this handler thread. Every message queued
++        // behind it -- H_BOOT_COMPLETED, H_COMPLETE_UNLOCK_USER, H_VOLUME_MOUNT --
++        // would then go unprocessed and /storage/emulated would stay unmounted for
++        // the whole boot. Keep it off this thread so a stuck codec service can only
++        // affect transcoding.
++        new Thread(this::configureTranscoding, "StorageTranscodeConfig").start();
+     }
+ 
+     /**
+@@ -2237,6 +2244,21 @@ class StorageManagerService extends IStorageManager.Stub
+ 
+     private void handleBootCompleted() {
+         resetIfBootedAndConnected();
++
++        // The first emulated-volume mount can race MediaProvider startup on some
++        // devices and leave /storage/emulated/0 unmounted for the whole boot.
++        // Retry once the system has settled; a second mount of an already
++        // mounted volume is a no-op in vold.
++        mHandler.postDelayed(() -> {
++            for (int i = 0; i < mVolumes.size(); i++) {
++                final WatchedVolumeInfo vol = mVolumes.valueAt(i);
++                if (vol.getType() == VolumeInfo.TYPE_EMULATED
++                        && vol.getState() == VolumeInfo.STATE_UNMOUNTED) {
++                    Slog.i(TAG, "Retrying mount of " + vol.getId() + " after boot");
++                    mHandler.obtainMessage(H_VOLUME_MOUNT, vol).sendToTarget();
++                }
++            }
++        }, 15000);
+     }
+ 
+     private String getDefaultPrimaryStorageUuid() {
+diff --git a/telephony/java/android/telephony/TelephonyBaseUtilsStub.java b/telephony/java/android/telephony/TelephonyBaseUtilsStub.java
+new file mode 100644
+index 000000000000..31cd9a026047
+--- /dev/null
++++ b/telephony/java/android/telephony/TelephonyBaseUtilsStub.java
+@@ -0,0 +1,45 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *      http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package android.telephony;
++
++/**
++ * Stub for the MIUI framework class of the same name.
++ *
++ * <p>The stock {@code org.codeaurora.ims} and {@code QtiTelephony} blobs link
++ * against {@code android.telephony.TelephonyBaseUtilsStub} to ask whether they
++ * are running on MIUI, and pick MIUI-specific telephony code paths when they
++ * are. AOSP/LineageOS has no such class, so the linker fails with
++ * {@code ClassNotFoundException} while the IMS service is being created and the
++ * service crash-loops before it can ever register with
++ * {@code com.android.internal.telephony.ims.ImsResolver}.
++ *
++ * <p>Only {@link #isMiuiRom()} is called by those blobs, and this build is not
++ * MIUI, so it always reports {@code false}.
++ *
++ * @hide
++ */
++public final class TelephonyBaseUtilsStub {
++    private TelephonyBaseUtilsStub() {
++    }
++
++    /**
++     * @return whether this build is MIUI.
++     */
++    public static boolean isMiuiRom() {
++        return false;
++    }
++}

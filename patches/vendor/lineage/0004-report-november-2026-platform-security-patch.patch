@@ -1,0 +1,10 @@
+diff --git a/release/flag_values/bp4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto b/release/flag_values/bp4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+index 8d173bc..b8052f5 100644
+--- a/release/flag_values/bp4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
++++ b/release/flag_values/bp4a/RELEASE_PLATFORM_SECURITY_PATCH.textproto
+@@ -1,4 +1,4 @@
+ name: "RELEASE_PLATFORM_SECURITY_PATCH"
+ value {
+-  string_value: "2026-10-01"
++  string_value: "2026-11-05"
+ }

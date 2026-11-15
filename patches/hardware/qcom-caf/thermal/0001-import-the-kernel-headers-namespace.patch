@@ -1,0 +1,19 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [hardware/qcom-caf/thermal] import the kernel headers namespace
+
+diff --git a/Android.bp b/Android.bp
+index 8746923..a102b20 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -1,4 +1,10 @@
+ soong_namespace {
++    imports: [
++        // thermal-service puts qti_kernel_headers on its header_libs; the
++        // integer types the kernel uapi needs come from the kernel_headers
++        // module that this namespace defines.
++        "hardware/google/pixel/kernel_headers",
++    ],
+ }
+ 
+ cc_binary {

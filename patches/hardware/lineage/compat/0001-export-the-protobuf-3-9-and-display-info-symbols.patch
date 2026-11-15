@@ -1,0 +1,333 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [hardware/lineage/compat] export the protobuf 3.9 and display-info symbols the vendor blobs import
+
+diff --git a/Android.bp b/Android.bp
+index e57d86e..a9b20af 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -453,14 +453,50 @@ cc_library_shared {
+         "libutils",
+     ],
+     srcs: [
++        "libui/DynamicDisplayInfo.cpp",
+         "libui/Fence.cpp",
+         "libui/GraphicBuffer.cpp",
+         "libui/GraphicBufferMapper.cpp",
++        "libui/StaticDisplayInfo.cpp",
+     ],
+     system_ext_specific: true,
+     vendor_available: true,
+ }
+ 
++// The stock Codec2 library (vendor/lib(64)/libcodec2_vndk.so) still imports the
++// six-argument GraphicBufferMapper::lock and the fence-less unlock, and the
++// firmware's libgui_vendor.so still imports ui::StaticDisplayInfo's Flattenable
++// API. Both live on /vendor, whose linker namespace does not search
++// /system_ext/lib64, so device.mk installs the vendor variant of this module
++// (libui_shim.vendor) next to the blobs that need it.
++
++// Qualcomm's qccsyshal 1.2 blobs were built against protobuf 3.9, where
++// Message::CopyWithSourceCheck(Message&, Message const&) was an exported
++// symbol. Protobuf 4.25 no longer has it, so the vendored HAL aborts at load
++// time with "cannot locate symbol ... CopyWithSourceCheck". This shim exports
++// the old mangled name and forwards to the virtual CopyFrom().
++cc_library_shared {
++    name: "libprotobuf-qccshim",
++    system_ext_specific: true,
++    srcs: [
++        "libprotobuf/AssignDescriptors.cpp",
++        "libprotobuf/CopyWithSourceCheck.cpp",
++        "libprotobuf/ParseFromString.cpp",
++    ],
++    include_dirs: [
++        "external/abseil-cpp",
++        "external/protobuf/src",
++    ],
++    shared_libs: [
++        "libc++",
++        "libprotobuf-cpp-full",
++    ],
++    cflags: [
++        "-Wall",
++        "-Werror",
++    ],
++}
++
+ cc_prebuilt_library_shared {
+     name: "libui-v34",
+     vendor: true,
+diff --git a/libprotobuf/AssignDescriptors.cpp b/libprotobuf/AssignDescriptors.cpp
+new file mode 100644
+index 0000000..debe601
+--- /dev/null
++++ b/libprotobuf/AssignDescriptors.cpp
+@@ -0,0 +1,48 @@
++/*
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/*
++ * Qualcomm's qccsyshal 1.2 implementation was built against protobuf 3.9,
++ * where google::protobuf::internal::AssignDescriptors(const DescriptorTable*,
++ * bool) was an exported symbol. Protobuf 4.25 no longer exports that entry
++ * point, so the prebuilt HAL fails to load:
++ *
++ *   CANNOT LINK EXECUTABLE "/system/system_ext/bin/qccsyshal@1.2-service":
++ *   cannot locate symbol
++ *   "_ZN6google8protobuf8internal17AssignDescriptorsEPKNS1_15DescriptorTableEb"
++ *
++ * In 3.9 the function only parked the table pointer for lazy reflection; the
++ * messages this HAL serializes do not use reflection. Provide the old mangled
++ * names as no-ops so the service can link.
++ *
++ * The generated code also calls the older entry point that takes a function
++ * pointer, a once_flag and the Metadata reference:
++ *
++ *   AssignDescriptors(const DescriptorTable* (*get_table)(), std::once_flag*,
++ *                     const Metadata&)
++ *
++ * so both overloads have to be present.
++ */
++
++#include <mutex>
++
++namespace google {
++namespace protobuf {
++
++// 3.9 declares Metadata in google::protobuf, not in internal; the mangled
++// name the prebuilt HAL imports is ...RKNS0_8MetadataE.
++struct Metadata;
++
++namespace internal {
++
++struct DescriptorTable;
++
++__attribute__((visibility("default"))) void AssignDescriptors(const DescriptorTable*, bool) {}
++
++__attribute__((visibility("default"))) void AssignDescriptors(
++        const DescriptorTable* (*)(), std::once_flag*, const Metadata&) {}
++
++}  // namespace internal
++}  // namespace protobuf
++}  // namespace google
+diff --git a/libprotobuf/CopyWithSourceCheck.cpp b/libprotobuf/CopyWithSourceCheck.cpp
+new file mode 100644
+index 0000000..48a3591
+--- /dev/null
++++ b/libprotobuf/CopyWithSourceCheck.cpp
+@@ -0,0 +1,27 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/*
++ * Qualcomm's qccsyshal 1.2 implementation was built against protobuf 3.9, where
++ * google::protobuf::Message::CopyWithSourceCheck(Message&, const Message&) is
++ * an out-of-line exported symbol. Protobuf 4.25 removed it, so the prebuilt HAL
++ * fails to link at runtime:
++ *
++ *   CANNOT LINK EXECUTABLE "/system/system_ext/bin/qccsyshal@1.2-service":
++ *   cannot locate symbol "_ZN6google8protobuf7Message19CopyWithSourceCheckERS1_RKS1_"
++ *
++ * Define the old mangled name here and forward to the virtual CopyFrom(), which
++ * is the operation the 3.9 implementation performed after its debug-only type
++ * check.
++ */
++
++#include <google/protobuf/message.h>
++
++extern "C" __attribute__((visibility("default"))) void
++_ZN6google8protobuf7Message19CopyWithSourceCheckERS1_RKS1_(google::protobuf::Message& to,
++                                                           const google::protobuf::Message& from) {
++    to.CopyFrom(from);
++}
+diff --git a/libprotobuf/ParseFromString.cpp b/libprotobuf/ParseFromString.cpp
+new file mode 100644
+index 0000000..d09d3c3
+--- /dev/null
++++ b/libprotobuf/ParseFromString.cpp
+@@ -0,0 +1,25 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/*
++ * Second protobuf 3.9 symbol the qccsyshal 1.2 blobs need. Protobuf 4.25
++ * takes the payload as absl::string_view and no longer emits an out-of-line
++ * std::string overload, so the prebuilt HAL aborts at load time with:
++ *
++ *   cannot locate symbol
++ *   "_ZN6google8protobuf11MessageLite15ParseFromStringERKNSt3__112basic_string..._"
++ *
++ * The 3.9 implementation is a two-line forward to the virtual ParseFromArray(),
++ * so define the old mangled name and forward to the same place.
++ */
++
++#include <google/protobuf/message_lite.h>
++
++extern "C" __attribute__((visibility("default"))) bool
++_ZN6google8protobuf11MessageLite15ParseFromStringERKNSt3__112basic_stringIcNS2_11char_traitsIcEENS2_9allocatorIcEEEE(
++        google::protobuf::MessageLite* message, const std::string& data) {
++    return message->ParseFromArray(data.data(), static_cast<int>(data.size()));
++}
+diff --git a/libui/DynamicDisplayInfo.cpp b/libui/DynamicDisplayInfo.cpp
+new file mode 100644
+index 0000000..8535343
+--- /dev/null
++++ b/libui/DynamicDisplayInfo.cpp
+@@ -0,0 +1,43 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++// Second half of the pre-Android-14 display-info ABI that the firmware's
++// libgui_vendor.so still imports; see StaticDisplayInfo.cpp for the full
++// explanation of why libui no longer provides it.
++//
++// ui::DynamicDisplayInfo carried a Flattenable API because gui::DynamicDisplayInfo
++// was an AIDL parcelable declared against its C++ header. Android 16 dropped the
++// whole getDynamicDisplayInfo() call in favour of getDisplayInfo(), so the blob's
++// version of that transaction no longer exists on the composer side and the
++// flattened layout has no producer left.
++//
++// It is therefore kept deliberately empty: self-consistent, never parses bytes it
++// did not write, and leaves the caller's struct at its defaults. FOD
++// high-brightness mode goes through DisplayFeatureControl::sendBrightness(),
++// which does not consult display info, so this is not on the HBM path.
++
++#include <stdint.h>
++#include <utils/Errors.h>
++
++extern "C" {
++
++size_t _ZNK7android2ui18DynamicDisplayInfo16getFlattenedSizeEv(const void* /*self*/) {
++    return 0;
++}
++
++android::status_t _ZNK7android2ui18DynamicDisplayInfo7flattenEPvm(const void* /*self*/,
++                                                                 void* /*buffer*/,
++                                                                 size_t /*size*/) {
++    return android::OK;
++}
++
++android::status_t _ZN7android2ui18DynamicDisplayInfo9unflattenEPKvm(void* /*self*/,
++                                                                   const void* /*buffer*/,
++                                                                   size_t /*size*/) {
++    return android::OK;
++}
++
++}  // extern "C"
+diff --git a/libui/StaticDisplayInfo.cpp b/libui/StaticDisplayInfo.cpp
+new file mode 100644
+index 0000000..727e149
+--- /dev/null
++++ b/libui/StaticDisplayInfo.cpp
+@@ -0,0 +1,102 @@
++/*
++ * Copyright (C) 2026 The LineageOS Project
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++// The firmware's libgui_vendor.so was built against the pre-Android-14
++// ui::StaticDisplayInfo Flattenable API:
++//
++//   size_t getFlattenedSize() const;
++//   status_t flatten(void* buffer, size_t size) const;
++//   status_t unflatten(void const* buffer, size_t size);
++//
++// Those members were dropped when StaticDisplayInfo became an AIDL parcelable,
++// so libui no longer exports them. libgui_vendor.so declares them as undefined
++// and the linker refuses to load it at all, which takes down every consumer:
++//
++//   CANNOT LINK EXECUTABLE "/vendor/bin/displayfeature": cannot locate symbol
++//     "_ZNK7android2ui17StaticDisplayInfo16getFlattenedSizeEv"
++//     referenced by "/vendor/lib64/libgui_vendor.so"
++//   init: Service 'displayfeature' (pid 8301) exited with status 1
++//
++// Both ends of the round trip are the vendor library's own, so the byte format
++// only has to agree with itself; the stock field order is kept anyway.
++//
++// DeviceProductInfo is the one optional member, and it only describes a display
++// reached over a link (TVs, external panels). The internal panel never carries
++// one, so the presence byte is written as 0, which is also what stock produces
++// on this device.
++
++#include <stdint.h>
++#include <string.h>
++#include <utils/Errors.h>
++
++namespace {
++
++// Pre-Android-14 ui::StaticDisplayInfo, as laid out by the vendor library:
++//
++//   DisplayConnectionType connectionType;   // int32_t
++//   float density;
++//   bool secure;
++//   std::optional<DeviceProductInfo> deviceProductInfo;
++constexpr size_t kConnectionTypeOffset = 0;
++constexpr size_t kDensityOffset = kConnectionTypeOffset + sizeof(int32_t);
++constexpr size_t kSecureOffset = kDensityOffset + sizeof(float);
++constexpr size_t kProductInfoOffset = kSecureOffset + sizeof(uint8_t);
++constexpr size_t kFlattenedSize = kProductInfoOffset + sizeof(uint8_t);
++
++}  // namespace
++
++extern "C" {
++
++size_t _ZNK7android2ui17StaticDisplayInfo16getFlattenedSizeEv(const void* /*self*/) {
++    return kFlattenedSize;
++}
++
++android::status_t _ZNK7android2ui17StaticDisplayInfo7flattenEPvm(const void* self, void* buffer,
++                                                                size_t size) {
++    if (buffer == nullptr || size < kFlattenedSize) {
++        return android::BAD_VALUE;
++    }
++
++    const auto* in = static_cast<const uint8_t*>(self);
++    auto* out = static_cast<uint8_t*>(buffer);
++
++    memcpy(out, in + kConnectionTypeOffset, sizeof(int32_t));
++    out += sizeof(int32_t);
++    memcpy(out, in + kDensityOffset, sizeof(float));
++    out += sizeof(float);
++    memcpy(out, in + kSecureOffset, sizeof(uint8_t));
++    out += sizeof(uint8_t);
++    *out = 0;  // no DeviceProductInfo; see the note above
++
++    return android::OK;
++}
++
++android::status_t _ZN7android2ui17StaticDisplayInfo9unflattenEPKvm(void* self, const void* buffer,
++                                                                  size_t size) {
++    if (buffer == nullptr || size < kFlattenedSize) {
++        return android::BAD_VALUE;
++    }
++
++    const auto* in = static_cast<const uint8_t*>(buffer);
++    auto* out = static_cast<uint8_t*>(self);
++
++    memcpy(out + kConnectionTypeOffset, in, sizeof(int32_t));
++    in += sizeof(int32_t);
++    memcpy(out + kDensityOffset, in, sizeof(float));
++    in += sizeof(float);
++    memcpy(out + kSecureOffset, in, sizeof(uint8_t));
++    in += sizeof(uint8_t);
++
++    if (*in != 0) {
++        // The vendor library never fills this in, so a set flag means the
++        // buffer did not come from flatten() above.
++        return android::BAD_VALUE;
++    }
++
++    return android::OK;
++}
++
++}  // extern "C"

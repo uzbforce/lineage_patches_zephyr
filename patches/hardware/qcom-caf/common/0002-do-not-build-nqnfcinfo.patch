@@ -1,0 +1,21 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+
+Subject: [hardware/qcom-caf/common] do not build nqnfcinfo
+
+diff --git a/nqnfcinfo/Android.bp b/nqnfcinfo/Android.bp
+index 6cc1c9d..332d25a 100644
+--- a/nqnfcinfo/Android.bp
++++ b/nqnfcinfo/Android.bp
+@@ -2,6 +2,12 @@ cc_binary {
+     name: "nqnfcinfo",
+     vendor: true,
+ 
++    // zephyr has no NQ NFC (it ships a THN31 with Xiaomi's TMS HAL) and its
++    // kernel tree has no include/uapi/linux/nfc/nfcinfo.h to compile against.
++    // The stock vendor/bin/nqnfcinfo is extracted as a blob, so building the
++    // source copy only collides with it on the vendor image.
++    enabled: false,
++
+     cflags: [
+         "-Wall",
+         "-Werror",
