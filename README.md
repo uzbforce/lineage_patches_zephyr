@@ -1,4 +1,4 @@
-# xiaomi_zephyr_cusrom_patches
+# lineage_patches_zephyr
 
 Source patches needed to build a custom ROM (LineageOS 23.2) for the
 **Redmi Note 17 4G** — codename `zephyr`, SM6225-AF (`bengal`).
@@ -10,7 +10,7 @@ others: changes to **ROM source projects themselves**.
 |---|---|
 | [android_device_xiaomi_zephyr](https://github.com/uzbforce/android_device_xiaomi_zephyr) | device tree: `BoardConfig.mk`, product makefiles, `rootdir/`, `configs/`, `sepolicy/`, `overlay/`, `tools/`, the local manifest for the platform tree |
 | [android_vendor_xiaomi_zephyr](https://github.com/uzbforce/android_vendor_xiaomi_zephyr) | the blobs taken out of the stock firmware |
-| **xiaomi_zephyr_cusrom_patches** (this repo) | patches against ROM source projects, and the helpers that make them |
+| **lineage_patches_zephyr** (this repo) | patches against ROM source projects, and the helpers that make them |
 | SM6225 platform repos | the platform HAL tree LineageOS 23.2 does not ship (`hardware/qcom-caf/common`, `hardware/qcom-caf/sm6225/*`, `device/qcom/sepolicy_vndr/sm6225`), mirrored from the `rn124g-development` forks into the `uzbforce` org and pinned by `device/xiaomi/zephyr/local_manifests/zephyr.xml` |
 
 ## Layout
