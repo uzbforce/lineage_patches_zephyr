@@ -1,16 +1,18 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [hardware/lineage/interfaces] drive the FOD press/release through the vendor extCmd
+Subject: [hardware/lineage/interfaces] drive the fod press release through the vendor extcmd
 
 diff --git a/biometrics/fingerprint/aidl/Fingerprint.cpp b/biometrics/fingerprint/aidl/Fingerprint.cpp
-index 381b394..9fde2bf 100644
+index 486e19c..7084a63 100644
 --- a/biometrics/fingerprint/aidl/Fingerprint.cpp
 +++ b/biometrics/fingerprint/aidl/Fingerprint.cpp
-@@ -40,10 +40,13 @@ Fingerprint::Fingerprint(std::shared_ptr<FingerprintConfig> config)
+@@ -40,10 +40,15 @@ Fingerprint::Fingerprint(std::shared_ptr<FingerprintConfig> config)
          mSensorType = FingerprintSensorType::HOME_BUTTON;
      } else if (sensorTypeProp == "rear") {
          mSensorType = FingerprintSensorType::REAR;
-+    } else if (sensorTypeProp == "udfps" || sensorTypeProp == "udfps_optical") {
++    } else if (sensorTypeProp == "udfps_optical" || sensorTypeProp == "udfps") {
 +        mSensorType = FingerprintSensorType::UNDER_DISPLAY_OPTICAL;
++    } else if (sensorTypeProp == "udfps_ultrasonic") {
++        mSensorType = FingerprintSensorType::UNDER_DISPLAY_ULTRASONIC;
      } else {
 +        // Not fatal: a sensor type we do not know is worth a loud log, but
 +        // taking the HAL down over it would lose the sensor entirely.
@@ -21,20 +23,9 @@ index 381b394..9fde2bf 100644
      }
      ALOGI("sensorTypeProp: %s", sensorTypeProp.c_str());
  }
-@@ -66,8 +69,19 @@ fingerprint_device_t* Fingerprint::openHal() {
-     int err;
+@@ -67,7 +72,8 @@ fingerprint_device_t* Fingerprint::openHal() {
      const hw_module_t* hw_mdl = nullptr;
      ALOGD("Opening fingerprint hal library...");
-+
-+    // The stock module is a plain libhardware driver, not a HIDL service: this
-+    // device ships it as /vendor/lib64/hw/fingerprint.goodix_fod.so, and the
-+    // HIDL 2.1 service that used to load it is gone.
-+    //
-+    // hw_get_module() is the only correct lookup here. It resolves
-+    // hw/fingerprint.<ro.hardware.fingerprint>.so first, and the device props
-+    // pin that to goodix_fod. hw_get_module_by_class("fingerprint", "goodix_fod")
-+    // would build the name "fingerprint.goodix_fod" and then look for
-+    // hw/fingerprint.goodix_fod.<ro.hardware>.so, which does not exist.
      if (0 != (err = hw_get_module(FINGERPRINT_HARDWARE_MODULE_ID, &hw_mdl))) {
 -        ALOGE("Can't open fingerprint HW Module, error: %d", err);
 +        ALOGE("Can't open fingerprint HW Module (ro.hardware.fingerprint=%s), error: %d",
@@ -42,7 +33,7 @@ index 381b394..9fde2bf 100644
          return nullptr;
      }
  
-@@ -181,7 +195,9 @@ ndk::ScopedAStatus Fingerprint::createSession(int32_t /*sensorId*/, int32_t user
+@@ -182,7 +188,9 @@ ndk::ScopedAStatus Fingerprint::createSession(int32_t /*sensorId*/, int32_t user
                                                std::shared_ptr<ISession>* out) {
      CHECK(mSession == nullptr || mSession->isClosed()) << "Open session already exists!";
  
@@ -54,7 +45,7 @@ index 381b394..9fde2bf 100644
  
      mSession->linkToDeath(cb->asBinder().get());
 diff --git a/biometrics/fingerprint/aidl/Session.cpp b/biometrics/fingerprint/aidl/Session.cpp
-index a2d20c5..238c03e 100644
+index b4faf6b..4d50ad7 100644
 --- a/biometrics/fingerprint/aidl/Session.cpp
 +++ b/biometrics/fingerprint/aidl/Session.cpp
 @@ -4,6 +4,14 @@
@@ -144,7 +135,7 @@ index a2d20c5..238c03e 100644
 +    : mDevice(device), mLockoutTracker(lockoutTracker), mUdfps(udfps), mUserId(userId), mCb(cb) {
      mDeathRecipient = AIBinder_DeathRecipient_new(onClientDeath);
  
-     auto path = std::format("/data/vendor_de/{}/fpdata/", userId);
+     auto path = std::format(FPDATA_PATH, userId);
 @@ -52,6 +115,7 @@ ndk::ScopedAStatus Session::enroll(const HardwareAuthToken& hat,
      translate(hat, authToken);
      int error = mDevice->enroll(mDevice, &authToken, mUserId, 60);

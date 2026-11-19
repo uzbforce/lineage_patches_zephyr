@@ -1,12 +1,11 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-
-Subject: [system/libbase] keep the pre-string-view libbase symbols the vendor HALs import
+Subject: [system/libbase] keep the pre-string-view libbase symbols the vendor hals import
 
 diff --git a/file.cpp b/file.cpp
-index 3224d6c..19fc296 100644
+index c03d7e1..cf95f04 100644
 --- a/file.cpp
 +++ b/file.cpp
-@@ -269,6 +269,18 @@ bool WriteStringToFd(std::string_view content, borrowed_fd fd) {
+@@ -277,6 +277,18 @@ bool WriteStringToFd(std::string_view content, borrowed_fd fd) {
    return true;
  }
  

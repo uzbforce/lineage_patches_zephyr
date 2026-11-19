@@ -1,36 +1,38 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [hardware/lineage/compat] export the protobuf 3.9 and display-info symbols the vendor blobs import
+Subject: [hardware/lineage/compat] export the protobuf 3.9 and display-info symbols
 
 diff --git a/Android.bp b/Android.bp
-index e57d86e..a9b20af 100644
+index 3c477f2..7490e5b 100644
 --- a/Android.bp
 +++ b/Android.bp
-@@ -453,14 +453,50 @@ cc_library_shared {
+@@ -145,6 +145,10 @@ cc_library {
+         "libbase/logging.cpp",
+         "libbase/strings.cpp",
+     ],
++    // 32-bit vendor consumers (libavservices_minijail, libreference-ril,
++    // tms-utils, the 32-bit codec2 library) import the same pre-string_view
++    // ABI, so the shim has to exist in vendor/lib as well.
++    compile_multilib: "both",
+     vendor: true,
+ }
+ 
+@@ -500,6 +504,7 @@ cc_library_shared {
          "libutils",
      ],
      srcs: [
-+        "libui/DynamicDisplayInfo.cpp",
++        "libui/DisplayInfo.cpp",
          "libui/Fence.cpp",
          "libui/GraphicBuffer.cpp",
          "libui/GraphicBufferMapper.cpp",
-+        "libui/StaticDisplayInfo.cpp",
-     ],
-     system_ext_specific: true,
+@@ -508,6 +513,33 @@ cc_library_shared {
      vendor_available: true,
  }
  
-+// The stock Codec2 library (vendor/lib(64)/libcodec2_vndk.so) still imports the
-+// six-argument GraphicBufferMapper::lock and the fence-less unlock, and the
-+// firmware's libgui_vendor.so still imports ui::StaticDisplayInfo's Flattenable
-+// API. Both live on /vendor, whose linker namespace does not search
-+// /system_ext/lib64, so device.mk installs the vendor variant of this module
-+// (libui_shim.vendor) next to the blobs that need it.
-+
 +// Qualcomm's qccsyshal 1.2 blobs were built against protobuf 3.9, where
 +// Message::CopyWithSourceCheck(Message&, Message const&) was an exported
 +// symbol. Protobuf 4.25 no longer has it, so the vendored HAL aborts at load
 +// time with "cannot locate symbol ... CopyWithSourceCheck". This shim exports
-+// the old mangled name and forwards to the virtual CopyFrom().
++// the old mangled names and forwards to the virtual CopyFrom().
 +cc_library_shared {
 +    name: "libprotobuf-qccshim",
 +    system_ext_specific: true,
@@ -54,7 +56,7 @@ index e57d86e..a9b20af 100644
 +}
 +
  cc_prebuilt_library_shared {
-     name: "libui-v34",
+     name: "libui-v32",
      vendor: true,
 diff --git a/libprotobuf/AssignDescriptors.cpp b/libprotobuf/AssignDescriptors.cpp
 new file mode 100644
@@ -174,160 +176,99 @@ index 0000000..d09d3c3
 +        google::protobuf::MessageLite* message, const std::string& data) {
 +    return message->ParseFromArray(data.data(), static_cast<int>(data.size()));
 +}
-diff --git a/libui/DynamicDisplayInfo.cpp b/libui/DynamicDisplayInfo.cpp
+diff --git a/libui/DisplayInfo.cpp b/libui/DisplayInfo.cpp
 new file mode 100644
-index 0000000..8535343
+index 0000000..382b128
 --- /dev/null
-+++ b/libui/DynamicDisplayInfo.cpp
-@@ -0,0 +1,43 @@
++++ b/libui/DisplayInfo.cpp
+@@ -0,0 +1,90 @@
 +/*
 + * Copyright (C) 2026 The LineageOS Project
 + *
 + * SPDX-License-Identifier: Apache-2.0
 + */
 +
-+// Second half of the pre-Android-14 display-info ABI that the firmware's
-+// libgui_vendor.so still imports; see StaticDisplayInfo.cpp for the full
-+// explanation of why libui no longer provides it.
-+//
-+// ui::DynamicDisplayInfo carried a Flattenable API because gui::DynamicDisplayInfo
-+// was an AIDL parcelable declared against its C++ header. Android 16 dropped the
-+// whole getDynamicDisplayInfo() call in favour of getDisplayInfo(), so the blob's
-+// version of that transaction no longer exists on the composer side and the
-+// flattened layout has no producer left.
-+//
-+// It is therefore kept deliberately empty: self-consistent, never parses bytes it
-+// did not write, and leaves the caller's struct at its defaults. FOD
-+// high-brightness mode goes through DisplayFeatureControl::sendBrightness(),
-+// which does not consult display info, so this is not on the HBM path.
-+
-+#include <stdint.h>
-+#include <utils/Errors.h>
-+
-+extern "C" {
-+
-+size_t _ZNK7android2ui18DynamicDisplayInfo16getFlattenedSizeEv(const void* /*self*/) {
-+    return 0;
-+}
-+
-+android::status_t _ZNK7android2ui18DynamicDisplayInfo7flattenEPvm(const void* /*self*/,
-+                                                                 void* /*buffer*/,
-+                                                                 size_t /*size*/) {
-+    return android::OK;
-+}
-+
-+android::status_t _ZN7android2ui18DynamicDisplayInfo9unflattenEPKvm(void* /*self*/,
-+                                                                   const void* /*buffer*/,
-+                                                                   size_t /*size*/) {
-+    return android::OK;
-+}
-+
-+}  // extern "C"
-diff --git a/libui/StaticDisplayInfo.cpp b/libui/StaticDisplayInfo.cpp
-new file mode 100644
-index 0000000..727e149
---- /dev/null
-+++ b/libui/StaticDisplayInfo.cpp
-@@ -0,0 +1,102 @@
-+/*
-+ * Copyright (C) 2026 The LineageOS Project
-+ *
-+ * SPDX-License-Identifier: Apache-2.0
-+ */
-+
-+// The firmware's libgui_vendor.so was built against the pre-Android-14
-+// ui::StaticDisplayInfo Flattenable API:
-+//
-+//   size_t getFlattenedSize() const;
-+//   status_t flatten(void* buffer, size_t size) const;
-+//   status_t unflatten(void const* buffer, size_t size);
-+//
-+// Those members were dropped when StaticDisplayInfo became an AIDL parcelable,
-+// so libui no longer exports them. libgui_vendor.so declares them as undefined
-+// and the linker refuses to load it at all, which takes down every consumer:
++// Android 17 dropped the LightFlattenable entry points from
++// ui::StaticDisplayInfo and ui::DynamicDisplayInfo (both are only serialised
++// through AIDL now). Xiaomi's prebuilt libgui_vendor.so still imports them and
++// is linked with -z now, so the display-feature HAL cannot even be dlopen()ed
++// without them:
 +//
 +//   CANNOT LINK EXECUTABLE "/vendor/bin/displayfeature": cannot locate symbol
-+//     "_ZNK7android2ui17StaticDisplayInfo16getFlattenedSizeEv"
-+//     referenced by "/vendor/lib64/libgui_vendor.so"
-+//   init: Service 'displayfeature' (pid 8301) exited with status 1
++//   "_ZNK7android2ui17StaticDisplayInfo16getFlattenedSizeEv" referenced by
++//   "/vendor/lib64/libgui_vendor.so"
 +//
-+// Both ends of the round trip are the vendor library's own, so the byte format
-+// only has to agree with itself; the stock field order is kept anyway.
++// vendor.qti.hardware.display.composer-service blocks on
++// vendor.xiaomi.hardware.displayfeature@1.0::IDisplayFeature/default, so that
++// failed load stalls the composer HAL, SurfaceFlinger never latches a frame
++// and the device stays on the boot logo.
 +//
-+// DeviceProductInfo is the one optional member, and it only describes a display
-+// reached over a link (TVs, external panels). The internal panel never carries
-+// one, so the presence byte is written as 0, which is also what stock produces
-+// on this device.
++// The legacy binder format has no reader left in Android 17, so these are pure
++// ABI shims: every entry point reports a fixed, self-consistent size and never
++// dereferences the caller's object. Re-check them after regenerating
++// vendor/xiaomi/zephyr from a new stock dump.
++//
++// ui::StaticDisplayInfo: connectionType, density, secure,
++// optional<DeviceProductInfo>, installOrientation.
++// ui::DynamicDisplayInfo: supportedDisplayModes, activeDisplayModeId,
++// renderFrameRate, supportedColorModes, activeColorMode, hdrCapabilities,
++// autoLowLatencyModeSupported, gameContentTypeSupported,
++// preferredBootDisplayMode.
 +
++#include <errno.h>
++#include <stddef.h>
 +#include <stdint.h>
 +#include <string.h>
-+#include <utils/Errors.h>
 +
 +namespace {
 +
-+// Pre-Android-14 ui::StaticDisplayInfo, as laid out by the vendor library:
-+//
-+//   DisplayConnectionType connectionType;   // int32_t
-+//   float density;
-+//   bool secure;
-+//   std::optional<DeviceProductInfo> deviceProductInfo;
-+constexpr size_t kConnectionTypeOffset = 0;
-+constexpr size_t kDensityOffset = kConnectionTypeOffset + sizeof(int32_t);
-+constexpr size_t kSecureOffset = kDensityOffset + sizeof(float);
-+constexpr size_t kProductInfoOffset = kSecureOffset + sizeof(uint8_t);
-+constexpr size_t kFlattenedSize = kProductInfoOffset + sizeof(uint8_t);
++constexpr size_t kStaticDisplayInfoSize = 4 + 4 + 1 + 1 + 4;
++constexpr size_t kDynamicDisplayInfoSize = 4 + 4 + 4 + 4 + 4 + 1 + 1 + 4;
 +
 +}  // namespace
 +
 +extern "C" {
 +
 +size_t _ZNK7android2ui17StaticDisplayInfo16getFlattenedSizeEv(const void* /*self*/) {
-+    return kFlattenedSize;
++    return kStaticDisplayInfoSize;
 +}
 +
-+android::status_t _ZNK7android2ui17StaticDisplayInfo7flattenEPvm(const void* self, void* buffer,
-+                                                                size_t size) {
-+    if (buffer == nullptr || size < kFlattenedSize) {
-+        return android::BAD_VALUE;
++int32_t _ZNK7android2ui17StaticDisplayInfo7flattenEPvm(const void* /*self*/, void* buffer,
++                                                       size_t size) {
++    if (buffer == nullptr || size < kStaticDisplayInfoSize) {
++        return -ENOMEM;
 +    }
-+
-+    const auto* in = static_cast<const uint8_t*>(self);
-+    auto* out = static_cast<uint8_t*>(buffer);
-+
-+    memcpy(out, in + kConnectionTypeOffset, sizeof(int32_t));
-+    out += sizeof(int32_t);
-+    memcpy(out, in + kDensityOffset, sizeof(float));
-+    out += sizeof(float);
-+    memcpy(out, in + kSecureOffset, sizeof(uint8_t));
-+    out += sizeof(uint8_t);
-+    *out = 0;  // no DeviceProductInfo; see the note above
-+
-+    return android::OK;
++    memset(buffer, 0, kStaticDisplayInfoSize);
++    return 0;
 +}
 +
-+android::status_t _ZN7android2ui17StaticDisplayInfo9unflattenEPKvm(void* self, const void* buffer,
-+                                                                  size_t size) {
-+    if (buffer == nullptr || size < kFlattenedSize) {
-+        return android::BAD_VALUE;
++int32_t _ZN7android2ui17StaticDisplayInfo9unflattenEPKvm(void* /*self*/, const void* buffer,
++                                                         size_t size) {
++    if (buffer == nullptr || size < kStaticDisplayInfoSize) {
++        return -EINVAL;
 +    }
++    return 0;
++}
 +
-+    const auto* in = static_cast<const uint8_t*>(buffer);
-+    auto* out = static_cast<uint8_t*>(self);
++size_t _ZNK7android2ui18DynamicDisplayInfo16getFlattenedSizeEv(const void* /*self*/) {
++    return kDynamicDisplayInfoSize;
++}
 +
-+    memcpy(out + kConnectionTypeOffset, in, sizeof(int32_t));
-+    in += sizeof(int32_t);
-+    memcpy(out + kDensityOffset, in, sizeof(float));
-+    in += sizeof(float);
-+    memcpy(out + kSecureOffset, in, sizeof(uint8_t));
-+    in += sizeof(uint8_t);
-+
-+    if (*in != 0) {
-+        // The vendor library never fills this in, so a set flag means the
-+        // buffer did not come from flatten() above.
-+        return android::BAD_VALUE;
++int32_t _ZNK7android2ui18DynamicDisplayInfo7flattenEPvm(const void* /*self*/, void* buffer,
++                                                        size_t size) {
++    if (buffer == nullptr || size < kDynamicDisplayInfoSize) {
++        return -ENOMEM;
 +    }
++    memset(buffer, 0, kDynamicDisplayInfoSize);
++    return 0;
++}
 +
-+    return android::OK;
++int32_t _ZN7android2ui18DynamicDisplayInfo9unflattenEPKvm(void* /*self*/, const void* buffer,
++                                                          size_t size) {
++    if (buffer == nullptr || size < kDynamicDisplayInfoSize) {
++        return -EINVAL;
++    }
++    return 0;
 +}
 +
 +}  // extern "C"

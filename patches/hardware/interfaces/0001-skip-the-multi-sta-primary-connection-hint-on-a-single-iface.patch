@@ -1,11 +1,11 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [hardware/interfaces] skip the multi-STA primary connection hint on a single iface
+Subject: [hardware/interfaces] skip the multi-sta primary connection hint on a single iface
 
 diff --git a/wifi/aidl/default/wifi_chip.cpp b/wifi/aidl/default/wifi_chip.cpp
-index 7df168e365..09b23e0762 100644
+index 813cc8c473..72c59042fd 100644
 --- a/wifi/aidl/default/wifi_chip.cpp
 +++ b/wifi/aidl/default/wifi_chip.cpp
-@@ -1303,6 +1303,15 @@ ndk::ScopedAStatus WifiChip::setLatencyModeInternal(IWifiChip::LatencyMode mode)
+@@ -1324,6 +1324,15 @@ ndk::ScopedAStatus WifiChip::setLatencyModeInternal(IWifiChip::LatencyMode mode)
  }
  
  ndk::ScopedAStatus WifiChip::setMultiStaPrimaryConnectionInternal(const std::string& ifname) {

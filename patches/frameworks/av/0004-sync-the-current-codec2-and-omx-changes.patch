@@ -1,11 +1,11 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [frameworks/av] sync the current codec2 and OMX changes
+Subject: [frameworks/av] sync the current codec2 and omx changes
 
 diff --git a/media/codec2/sfplugin/CCodec.cpp b/media/codec2/sfplugin/CCodec.cpp
-index ea44e121d4..c2bb0f3464 100644
+index 292e9abd42..d97eb1a588 100644
 --- a/media/codec2/sfplugin/CCodec.cpp
 +++ b/media/codec2/sfplugin/CCodec.cpp
-@@ -2132,7 +2132,9 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
+@@ -2131,7 +2131,9 @@ sp<PersistentSurface> CCodec::CreateOmxInputSurface() {
      using namespace android::hardware::media::omx::V1_0::utils;
      using namespace android::hardware::graphics::bufferqueue::V1_0::utils;
      typedef android::hardware::media::omx::V1_0::Status OmxStatus;
@@ -16,12 +16,19 @@ index ea44e121d4..c2bb0f3464 100644
      if (omx == nullptr) {
          return nullptr;
      }
-@@ -3406,17 +3408,28 @@ void CCodec::initiateReleaseIfStuck() {
+@@ -3425,24 +3427,14 @@ void CCodec::initiateReleaseIfStuck() {
  // static
- PersistentSurface *CCodec::CreateInputSurface() {
+ PersistentSurface *CCodec::CreateInputSurface(const std::shared_ptr<Codec2Client> &client) {
      using namespace android;
--    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
--            Codec2Client::CreateInputSurface();
+-    std::shared_ptr<Codec2Client::InputSurface> inputSurface;
+-    if (!client) {
+-        inputSurface = Codec2Client::CreateInputSurface();
+-    } else {
+-        c2_status_t res = client->createInputSurface(&inputSurface);
+-        if (res != C2_OK && res != C2_OMITTED) {
+-            ALOGE("creating InputSurface from client failed %d", res);
+-        }
+-    }
 -    if (inputSurface) {
 -        ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
 -        ANativeWindow *window = inputSurface->getNativeWindow();
@@ -29,42 +36,34 @@ index ea44e121d4..c2bb0f3464 100644
 -                mediaflagtools::nativeWindowToSurfaceType(window),
 -                interface);
 -    }
-+    // zephyr: this device's Codec2 store is HIDL-only
-+    // (vendor.qti.media.c2@1.0-service, exposing IComponentStore/default and
-+    // /default2 plus media.swcodec's /software). Asking that store for a
-+    // store-provided input surface never returns: Codec2Client enumerates
-+    // "default" "default2" "software" "__ApexCodecs__" and blocks inside the
-+    // HIDL call, so CCodec's own watchdog fires first and turns it into a fatal
-+    // error:
-+    //
-+    //   W CCodec: [c2.qti.avc.encoder] previous call to createInputSurface
-+    //             exceeded timeout
-+    //   -> onError(UNKNOWN_ERROR, ACTION_CODE_FATAL)
-+    //   screenrecord: ERROR: unable to create encoder input surface (err=-2147483648)
-+    //
-+    // Decoding to a Surface still worked because that path allocates its output
-+    // buffers through the buffer channel and never calls this.
-+    //
-+    // debug.stagefright.c2inputsurface=-1 already selects a locally created
-+    // AidlGraphicBufferSource, but stock only tests it *after* the hanging store
-+    // call, so it could never take effect here. Test it first: with the switch
-+    // set, the surface is built in-process and Codec2Client::CreateInputSurface()
-+    // is never entered. Set it to -1 in the device props.
++
++    // zephyr: the vendor Codec2 store is HIDL-only and
++    // Codec2Client::CreateInputSurface() can block forever inside the HIDL
++    // call, so CCodec's own watchdog fires and screenrecord/encoders fail.
++    // The local AidlGraphicBufferSource path already exists behind
++    // debug.stagefright.c2inputsurface=-1, but stock only tests it after the
++    // store call; test it first. The device props set it to -1.
      if (property_get_int32("debug.stagefright.c2inputsurface", 0) == -1) {
 -        sp<IGraphicBufferProducer> gbp;
          sp<AidlGraphicBufferSource> gbs = new AidlGraphicBufferSource();
          status_t err = gbs->initCheck();
          if (err != OK) {
-@@ -3432,9 +3445,19 @@ PersistentSurface *CCodec::CreateInputSurface() {
+@@ -3458,9 +3450,26 @@ PersistentSurface *CCodec::CreateInputSurface(const std::shared_ptr<Codec2Client
                PersistentSurface::TYPE_AIDLSOURCE,
                mediaflagtools::igbpToSurfaceType(gbs->getIGraphicBufferProducer()),
                wrapper->asBinder());
--    } else {
--        return nullptr;
-     }
++    }
 +
-+    std::shared_ptr<Codec2Client::InputSurface> inputSurface =
-+            Codec2Client::CreateInputSurface();
++    std::shared_ptr<Codec2Client::InputSurface> inputSurface;
++    if (!client) {
++        inputSurface = Codec2Client::CreateInputSurface();
+     } else {
+-        return nullptr;
++        c2_status_t res = client->createInputSurface(&inputSurface);
++        if (res != C2_OK && res != C2_OMITTED) {
++            ALOGE("creating InputSurface from client failed %d", res);
++        }
+     }
 +    if (inputSurface) {
 +        ::ndk::SpAIBinder interface = inputSurface->getHalInterface();
 +        ANativeWindow *window = inputSurface->getNativeWindow();
@@ -78,19 +77,17 @@ index ea44e121d4..c2bb0f3464 100644
  
  class IntfCache {
 diff --git a/media/libmediaplayerservice/MediaPlayerService.cpp b/media/libmediaplayerservice/MediaPlayerService.cpp
-index ac67a5f191..05d05926b7 100644
+index 4a578adabc..80bd6fce03 100644
 --- a/media/libmediaplayerservice/MediaPlayerService.cpp
 +++ b/media/libmediaplayerservice/MediaPlayerService.cpp
-@@ -915,8 +915,14 @@ sp<MediaPlayerBase> MediaPlayerService::Client::setDataSource_pre(
+@@ -918,8 +918,12 @@ sp<MediaPlayerBase> MediaPlayerService::Client::setDataSource_pre(
  
          // Listen to death of OMX service
          {
 +            // Must not block. getService() retries forever while the service is
 +            // not registered, and on a codec2-only vendor the OMX HAL is often
 +            // absent entirely - here the stock binary is 32-bit and cannot even
-+            // exec on a 64-bit-only image, so it never registers. Blocking here
-+            // hangs setDataSource() and ANRs any app that plays a sound from the
-+            // UI thread (e.g. Messaging's sent-message tone on send).
++            // exec on a 64-bit-only image, so it never registers.
              sp<IBase> base = ::android::hardware::media::omx::V1_0::
 -                    IOmx::getService();
 +                    IOmx::tryGetService();
@@ -115,10 +112,10 @@ index 4d70a71c57..175d601adc 100644
                  ALOGD("OMX service is not available");
              } else {
 diff --git a/media/libstagefright/OmxInfoBuilder.cpp b/media/libstagefright/OmxInfoBuilder.cpp
-index 1cb8f14fd5..e672d0e0cd 100644
+index 1cb8f14fd5..bced96e226 100644
 --- a/media/libstagefright/OmxInfoBuilder.cpp
 +++ b/media/libstagefright/OmxInfoBuilder.cpp
-@@ -94,8 +94,14 @@ OmxInfoBuilder::OmxInfoBuilder(bool allowSurfaceEncoders)
+@@ -94,8 +94,13 @@ OmxInfoBuilder::OmxInfoBuilder(bool allowSurfaceEncoders)
  }
  
  status_t OmxInfoBuilder::buildMediaCodecList(MediaCodecListWriter* writer) {
@@ -126,11 +123,10 @@ index 1cb8f14fd5..e672d0e0cd 100644
 -    sp<IOmxStore> omxStore = IOmxStore::getService();
 +    // Obtain IOmxStore. This must not block. zephyr ships the stock OMX HAL,
 +    // which is a 32-bit binary, and the product is 64-bit-only, so the service
-+    // can never register. A blocking getService() spins forever on "Waited one
-+    // second for android.hardware.media.omx@1.0::IOmxStore/default", which
-+    // stalls MediaCodecList construction for every client and leaves players
-+    // stuck buffering. Ask for the stub: it returns null immediately and the
-+    // NO_INIT below is handled, so the C2 builders still enumerate codecs.
++    // can never register. A blocking getService() spins forever, which stalls
++    // MediaCodecList construction for every client and leaves players stuck
++    // buffering. Ask for the stub: it returns null immediately and the NO_INIT
++    // below is handled, so the C2 builders still enumerate codecs.
 +    sp<IOmxStore> omxStore = IOmxStore::getService("default", true /* getStub */);
      if (omxStore == nullptr) {
          ALOGE("Cannot find an IOmxStore service.");

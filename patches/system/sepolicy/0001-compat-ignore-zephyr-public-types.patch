@@ -1,3 +1,6 @@
+From: uzbforce <oktamovazizbek2010@gmail.com>
+Subject: [system/sepolicy] compat-ignore zephyr public types
+
 diff --git a/private/compat/202404/202404.ignore.cil b/private/compat/202404/202404.ignore.cil
 index c6ccb591c..e20d0fea8 100644
 --- a/private/compat/202404/202404.ignore.cil

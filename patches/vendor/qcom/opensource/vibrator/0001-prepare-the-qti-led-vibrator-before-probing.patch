@@ -1,11 +1,11 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [vendor/qcom/opensource/vibrator] prepare the QTI LED vibrator before probing
+Subject: [vendor/qcom/opensource/vibrator] prepare the qti led vibrator before probing
 
 diff --git a/aidl/VibratorOL/Vibrator.cpp b/aidl/VibratorOL/Vibrator.cpp
-index a5c58e1..a0f1550 100644
+index e470dfb..24f0d3b 100644
 --- a/aidl/VibratorOL/Vibrator.cpp
 +++ b/aidl/VibratorOL/Vibrator.cpp
-@@ -400,12 +400,32 @@ LedVibratorDevice::LedVibratorDevice() {
+@@ -402,12 +402,32 @@ LedVibratorDevice::LedVibratorDevice() {
      mDetected = false;
      mIsLdo = false;
  
@@ -39,7 +39,7 @@ index a5c58e1..a0f1550 100644
  
      mDetected = true;
  
-@@ -620,7 +640,10 @@ ndk::ScopedAStatus VibratorOL::on(int32_t timeoutMs,
+@@ -622,7 +642,10 @@ ndk::ScopedAStatus VibratorOL::on(int32_t timeoutMs,
                                  const std::shared_ptr<IVibratorCallback>& callback) {
      int ret;
  
@@ -51,15 +51,27 @@ index a5c58e1..a0f1550 100644
          // See QPNP_VIB_MIN_PLAY_MS, QPNP_VIB_MAX_PLAY_MS in leds-qpnp-vibrator-ldo.c
          timeoutMs = std::clamp(timeoutMs, 50, 15000);
      }
+diff --git a/aidl/VibratorSelector/VibratorSelector.cpp b/aidl/VibratorSelector/VibratorSelector.cpp
+index e1f8a4b..745ac1e 100644
+--- a/aidl/VibratorSelector/VibratorSelector.cpp
++++ b/aidl/VibratorSelector/VibratorSelector.cpp
+@@ -33,6 +33,7 @@
+  * IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
++#include <memory>
+ #include <errno.h>
+ #include <log/log.h>
+ #include <string>
 diff --git a/aidl/vendor.qti.hardware.vibrator.service.rc b/aidl/vendor.qti.hardware.vibrator.service.rc
-index 86f0aa6..740f64c 100644
+index f2b81bd..e9dfe95 100644
 --- a/aidl/vendor.qti.hardware.vibrator.service.rc
 +++ b/aidl/vendor.qti.hardware.vibrator.service.rc
-@@ -3,5 +3,20 @@ service vendor.qti.vibrator /vendor/bin/hw/vendor.qti.hardware.vibrator.service
-     user system
-     group system input
+@@ -4,5 +4,20 @@ service vendor.qti.vibrator /vendor/bin/hw/vendor.qti.hardware.vibrator.service
+     group system input wakelock
+     capabilities BLOCK_SUSPEND
  
--on late-init
+-on post-fs-data
 +# The vibrator LED is leds-qpnp-vibrator-ldo, which is a module: neither
 +# /sys/class/leds/vibrator nor its transient-trigger attributes exist yet at
 +# post-fs-data. The attributes are created when the trigger is selected, so

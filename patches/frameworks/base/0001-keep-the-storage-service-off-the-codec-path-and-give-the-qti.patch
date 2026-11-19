@@ -1,11 +1,39 @@
 From: uzbforce <oktamovazizbek2010@gmail.com>
-Subject: [frameworks/base] keep the storage service off the codec path and give the QTI IMS apk its stub
+Subject: [frameworks/base] keep the storage service off the codec path and unblock keyguard-occluded input
 
+diff --git a/packages/SystemUI/src/com/android/systemui/shade/NotificationShadeWindowControllerImpl.java b/packages/SystemUI/src/com/android/systemui/shade/NotificationShadeWindowControllerImpl.java
+index 25f87803e40a..a8fd75682909 100644
+--- a/packages/SystemUI/src/com/android/systemui/shade/NotificationShadeWindowControllerImpl.java
++++ b/packages/SystemUI/src/com/android/systemui/shade/NotificationShadeWindowControllerImpl.java
+@@ -360,6 +360,23 @@ public class NotificationShadeWindowControllerImpl
+         if (mKeyguardViewMediator.isShowingAndNotOccluded()) {
+             setKeyguardShowing(true);
+         }
++
++        if (!SceneContainerFlag.isEnabled()) {
++            // The notification shade window's occlusion state is normally updated from
++            // NotificationShadeWindowModel, which derives it from the keyguard transition
++            // state machine. That machine is not driven while the WM state refactor is
++            // disabled, so the window kept the keyguard-showing flags and stayed focusable
++            // on top of SHOW_WHEN_LOCKED activities (e.g. the secure camera launched from
++            // the lock screen), swallowing all touch and key input. Mirror the legacy
++            // KeyguardStateController here, as CentralSurfaces does for the scrim.
++            mKeyguardStateController.addCallback(
++                    new KeyguardStateController.Callback() {
++                        @Override
++                        public void onKeyguardShowingChanged() {
++                            setKeyguardOccluded(mKeyguardStateController.isOccluded());
++                        }
++                    });
++        }
+     }
+ 
+     @Nullable
 diff --git a/services/core/java/com/android/server/StorageManagerService.java b/services/core/java/com/android/server/StorageManagerService.java
-index 81e70659f0c6..141fd660f4e3 100644
+index c7d9893a3fb0..4c2de708621d 100644
 --- a/services/core/java/com/android/server/StorageManagerService.java
 +++ b/services/core/java/com/android/server/StorageManagerService.java
-@@ -972,7 +972,14 @@ class StorageManagerService extends IStorageManager.Stub
+@@ -997,7 +997,14 @@ class StorageManagerService extends IStorageManager.Stub
              }
          }
  
@@ -18,10 +46,10 @@ index 81e70659f0c6..141fd660f4e3 100644
 +        // the whole boot. Keep it off this thread so a stuck codec service can only
 +        // affect transcoding.
 +        new Thread(this::configureTranscoding, "StorageTranscodeConfig").start();
-     }
  
-     /**
-@@ -2237,6 +2244,21 @@ class StorageManagerService extends IStorageManager.Stub
+         // Guard the new feature call with the aflag
+         if (Flags.enableFilesystemConfigurationV2()) {
+@@ -2295,6 +2302,21 @@ class StorageManagerService extends IStorageManager.Stub
  
      private void handleBootCompleted() {
          resetIfBootedAndConnected();
